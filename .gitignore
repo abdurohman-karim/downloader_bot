@@ -1,0 +1,6 @@
+.env
+.pytest_cache_dir
+__pycache__
+.venv
+.idea
+downloads
