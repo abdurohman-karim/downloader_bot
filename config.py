@@ -11,8 +11,6 @@ DOWNLOAD_DIR: str = "downloads"
 MAX_FILE_SIZE: int = 49 * 1024 * 1024
 
 SUPPORTED_DOMAINS: tuple[str, ...] = (
-    "youtube.com",
-    "youtu.be",
     "tiktok.com",
     "vm.tiktok.com",
     "instagram.com",
@@ -20,7 +18,6 @@ SUPPORTED_DOMAINS: tuple[str, ...] = (
 )
 
 PLATFORM_EMOJIS: dict[str, str] = {
-    "YouTube": "🎬",
     "TikTok": "🎵",
     "Instagram": "📸",
 }

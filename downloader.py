@@ -1,8 +1,9 @@
 """
 yt-dlp download wrapper.
 
-Strategy: try formats from best (720p) down to worst.
+Strategy (auto mode): try formats from best (720p) down to worst.
 Stop at the first file that fits within Telegram's 50 MB limit.
+Quality mode (YouTube): download the exact requested quality directly.
 """
 
 from __future__ import annotations
@@ -36,19 +37,28 @@ class VideoDownloader:
     Heavy I/O runs in a thread pool via asyncio.to_thread (Python 3.9+).
     """
 
-    # Ordered best → worst. Each string is a yt-dlp format selector.
+    # Auto quality chain — ordered best → worst (TikTok / Instagram).
+    # Both portrait and landscape orientations are covered.
     _QUALITY_CHAIN: tuple[str, ...] = (
-        # 720p — best quality that still fits most uploads
-        "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]"
-        "/bestvideo[height<=720]+bestaudio/best[height<=720][ext=mp4]/best[height<=720]",
-        # 480p fallback
-        "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]"
-        "/bestvideo[height<=480]+bestaudio/best[height<=480][ext=mp4]/best[height<=480]",
-        # 360p fallback
-        "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]"
-        "/bestvideo[height<=360]+bestaudio/best[height<=360][ext=mp4]/best[height<=360]",
-        # Last resort
+        "bestvideo[width<=1280][height<=720]+bestaudio"
+        "/bestvideo[width<=720][height<=1280]+bestaudio"
+        "/best[width<=1280][height<=720]/best[width<=720][height<=1280]",
+        "bestvideo[width<=854][height<=480]+bestaudio"
+        "/bestvideo[width<=480][height<=854]+bestaudio"
+        "/best[width<=854][height<=480]/best[width<=480][height<=854]",
+        "bestvideo[width<=640][height<=360]+bestaudio"
+        "/bestvideo[width<=360][height<=640]+bestaudio"
+        "/best[width<=640][height<=360]/best[width<=360][height<=640]",
+        "best[ext=mp4]/best",
         "worst",
+    )
+
+    # Errors that mean the format wasn't available — safe to retry next format.
+    _FORMAT_ERRORS: tuple[str, ...] = (
+        "requested format is not available",
+        "no video formats found",
+        "requested format",
+        "не удалось найти подходящий формат",  # already translated by _friendly()
     )
 
     _HTTP_HEADERS: dict[str, str] = {
@@ -59,6 +69,17 @@ class VideoDownloader:
         )
     }
 
+    # Base yt-dlp options shared by every request
+    _BASE_OPTS: dict = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "socket_timeout": 30,
+        "retries": 3,
+        "fragment_retries": 3,
+        "force_ipv4": True,  # avoids [Errno 101] on servers without IPv6
+    }
+
     def __init__(self) -> None:
         self._dir = Path(DOWNLOAD_DIR)
         self._dir.mkdir(parents=True, exist_ok=True)
@@ -66,31 +87,27 @@ class VideoDownloader:
     # ── Public ────────────────────────────────────────────────────────────────
 
     async def download(self, url: str) -> DownloadResult:
-        """
-        Try quality levels from best to worst.
-        Returns the first result within the 50 MB limit,
-        or an error if all levels fail or remain too large.
-        """
+        last_error: Optional[str] = None
         for fmt in self._QUALITY_CHAIN:
             res = await self._attempt(url, fmt)
 
             if res.error:
-                return res  # yt-dlp / network error — no point retrying
+                if any(k in res.error.lower() for k in self._FORMAT_ERRORS):
+                    last_error = res.error
+                    continue
+                return res
 
             if res.path:
-                file_size = Path(res.path).stat().st_size
-                if file_size <= MAX_FILE_SIZE:
+                if Path(res.path).stat().st_size <= MAX_FILE_SIZE:
                     return res
-                # File is too big → clean up, try lower quality
                 self.cleanup(res.path)
 
-        return DownloadResult(
-            error="Видео слишком большое для Telegram (лимит 50 МБ)."
-        )
+        if last_error:
+            return DownloadResult(error="Не удалось найти подходящий формат видео.")
+        return DownloadResult(error="Видео слишком большое для Telegram (лимит 50 МБ).")
 
     @staticmethod
     def cleanup(path: str) -> None:
-        """Delete a downloaded file safely."""
         Path(path).unlink(missing_ok=True)
 
     # ── Internal ──────────────────────────────────────────────────────────────
@@ -100,17 +117,13 @@ class VideoDownloader:
         tmpl = str(self._dir / f"{uid}.%(ext)s")
 
         opts: dict = {
+            **self._BASE_OPTS,
             "outtmpl": tmpl,
             "format": fmt,
-            "merge_output_format": "mp4",
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,      # never download full playlists
-            "socket_timeout": 30,
-            "retries": 3,
-            "fragment_retries": 3,
             "http_headers": self._HTTP_HEADERS,
         }
+
+        opts["merge_output_format"] = "mp4"
 
         try:
             info = await asyncio.to_thread(self._sync_dl, url, opts)
@@ -119,7 +132,6 @@ class VideoDownloader:
         except Exception as exc:  # noqa: BLE001
             return DownloadResult(error=f"Ошибка загрузки: {str(exc)[:120]}")
 
-        # Locate the file yt-dlp wrote
         for f in self._dir.iterdir():
             if f.stem == uid:
                 return DownloadResult(
@@ -132,24 +144,26 @@ class VideoDownloader:
 
     @staticmethod
     def _sync_dl(url: str, opts: dict) -> dict:
-        """Blocking download — called from thread pool."""
         with yt_dlp.YoutubeDL(opts) as ydl:
-            return ydl.extract_info(url)  # download=True by default
+            return ydl.extract_info(url)
 
     @staticmethod
     def _friendly(raw: str) -> str:
-        """Map yt-dlp error messages to human-readable Russian text."""
         lower = raw.lower()
         checks = {
-            "video unavailable":       "Видео недоступно.",
-            "private video":           "Видео приватное.",
-            "this video is private":   "Видео приватное.",
-            "age":                     "Видео с возрастным ограничением.",
-            "login required":          "Требуется авторизация (приватный контент).",
-            "copyright":               "Видео заблокировано по авторским правам.",
-            "not a valid url":         "Неверная ссылка.",
-            "unsupported url":         "Ссылка не поддерживается.",
-            "no video formats":        "Не удалось найти подходящий формат видео.",
+            "video unavailable":                 "Видео недоступно.",
+            "private video":                     "Видео приватное.",
+            "this video is private":             "Видео приватное.",
+            "age":                               "Видео с возрастным ограничением.",
+            "login required":                    "Требуется авторизация (приватный контент).",
+            "copyright":                         "Видео заблокировано по авторским правам.",
+            "not a valid url":                   "Неверная ссылка.",
+            "unsupported url":                   "Ссылка не поддерживается.",
+            "no video formats":                  "Не удалось найти подходящий формат видео.",
+            "requested format is not available": "Не удалось найти подходящий формат видео.",
+            "network is unreachable":            "Ошибка сети. Попробуй позже.",
+            "errno 101":                         "Ошибка сети. Попробуй позже.",
+            "giving up after":                   "Ошибка сети. Попробуй позже.",
         }
         for key, msg in checks.items():
             if key in lower:
