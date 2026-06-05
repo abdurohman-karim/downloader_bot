@@ -11,12 +11,17 @@ import re
 from typing import Optional
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
-from aiogram.types import FSInputFile, Message
+from aiogram.types import Message
 
-from config import BOT_TOKEN, PLATFORM_EMOJIS, SUPPORTED_DOMAINS
-from downloader import DownloadResult, VideoDownloader
+from config import (
+    BOT_TOKEN,
+    MAX_QUEUE_SIZE,
+    MAX_WORKERS,
+    PLATFORM_EMOJIS,
+    SUPPORTED_DOMAINS,
+)
+from queue_manager import DownloadTask, QueueManager, safe_edit
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,9 +31,8 @@ log = logging.getLogger(__name__)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-downloader = VideoDownloader()
+queue_manager = QueueManager()
 
-_busy: set[int] = set()
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 
 
@@ -50,32 +54,20 @@ def platform_of(url: str) -> str:
     return "Video"
 
 
-def format_duration(secs: Optional[int]) -> str:
-    if not secs:
-        return ""
-    m, s = divmod(int(secs), 60)
-    h, m = divmod(m, 60)
-    return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+# ── Lifecycle ─────────────────────────────────────────────────────────────────
+
+@dp.startup()
+async def on_startup() -> None:
+    await queue_manager.start()
+    log.info("Queue started: %d workers", MAX_WORKERS)
 
 
-def build_caption(result: DownloadResult, platform: str) -> str:
-    emoji = PLATFORM_EMOJIS.get(platform, "🌐")
-    lines: list[str] = []
-    if result.title:
-        lines.append(f"<b>{result.title[:100]}</b>")
-    dur = format_duration(result.duration)
-    if dur:
-        lines.append(f"⏱ {dur}")
-    lines.append(f"{emoji} {platform}")
-    return "\n".join(lines)
+@dp.shutdown()
+async def on_shutdown() -> None:
+    log.info("Shutting down. Queue size: %d", queue_manager.stats["queue_size"])
 
 
-async def safe_edit(msg: Message, text: str) -> None:
-    try:
-        await msg.edit_text(text, parse_mode="HTML")
-    except TelegramBadRequest:
-        pass
-
+# ── Handlers ──────────────────────────────────────────────────────────────────
 
 @dp.message(Command("start"))
 async def cmd_start(msg: Message) -> None:
@@ -104,6 +96,19 @@ async def cmd_help(msg: Message) -> None:
     )
 
 
+@dp.message(Command("stats"))
+async def cmd_stats(msg: Message) -> None:
+    s = queue_manager.stats
+    await msg.answer(
+        "📊 <b>Статистика бота</b>\n\n"
+        f"• В очереди: <b>{s['queue_size']}</b> / {MAX_QUEUE_SIZE}\n"
+        f"• Активных загрузок: <b>{s['active']}</b> / {s['max_workers']}\n"
+        f"• Успешно обработано: <b>{s['total_ok']}</b>\n"
+        f"• Ошибок: <b>{s['total_err']}</b>",
+        parse_mode="HTML",
+    )
+
+
 @dp.message(F.text)
 async def handle_link(msg: Message) -> None:
     if msg.text and msg.text.startswith("/"):
@@ -121,46 +126,32 @@ async def handle_link(msg: Message) -> None:
         return
 
     user_id = msg.from_user.id if msg.from_user else 0
-
-    if user_id in _busy:
-        await msg.reply("⏳ Подожди — предыдущая загрузка ещё не завершена.")
-        return
-
     platform = platform_of(url)
     emoji = PLATFORM_EMOJIS.get(platform, "🌐")
-    status = await msg.reply(f"{emoji} Загружаю с {platform}…")
-    _busy.add(user_id)
-    result: Optional[DownloadResult] = None
 
-    try:
-        result = await downloader.download(url)
+    status = await msg.reply("⏳ Добавляю в очередь…")
 
-        if not result.ok:
-            await safe_edit(status, f"❌ {result.error}")
-            return
+    task = DownloadTask(
+        user_id=user_id,
+        url=url,
+        platform=platform,
+        reply_to=msg,
+        status_msg=status,
+    )
 
-        await safe_edit(status, "📤 Отправляю…")
-        await msg.reply_video(
-            video=FSInputFile(result.path),
-            caption=build_caption(result, platform),
-            parse_mode="HTML",
-        )
-        await status.delete()
+    success, payload = await queue_manager.enqueue(task)
+    if not success:
+        await safe_edit(status, payload)  # type: ignore[arg-type]
+        return
 
-    except TelegramBadRequest as exc:
-        log.warning("Telegram error [user=%s]: %s", user_id, exc)
-        await safe_edit(
-            status,
-            "❌ Не удалось отправить файл — вероятно, он слишком большой для Telegram.",
-        )
-    except Exception as exc:  # noqa: BLE001
-        log.exception("Unhandled error [user=%s]", user_id)
-        await safe_edit(status, f"❌ Непредвиденная ошибка: {str(exc)[:120]}")
-    finally:
-        _busy.discard(user_id)
-        if result and result.path:
-            VideoDownloader.cleanup(result.path)
+    pos: int = payload  # type: ignore[assignment]
+    if pos <= MAX_WORKERS:
+        await safe_edit(status, f"{emoji} Загружаю с {platform}…")
+    else:
+        await safe_edit(status, f"⏳ В очереди: позиция {pos}")
 
+
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 async def main() -> None:
     log.info("Bot started. Polling…")

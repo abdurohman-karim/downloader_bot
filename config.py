@@ -21,3 +21,9 @@ PLATFORM_EMOJIS: dict[str, str] = {
     "TikTok": "🎵",
     "Instagram": "📸",
 }
+
+MAX_WORKERS: int = 15       # параллельных загрузок одновременно
+MAX_QUEUE_SIZE: int = 500   # максимум задач в очереди
+MAX_USER_TASKS: int = 2     # задач от одного пользователя в очереди
+DOWNLOAD_TIMEOUT: int = 180 # секунд на одну загрузку (3 мин)
+MAX_WAIT_TIME: int = 600    # секунд ожидания в очереди (10 мин)
