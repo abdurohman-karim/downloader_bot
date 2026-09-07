@@ -1,6 +1,22 @@
+# окружение
 .env
-.pytest_cache_dir
-__pycache__
 .venv
-.idea
-downloads
+venv/
+
+# python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.idea/
+.vscode/
+
+# данные бота
+downloads/
+*.db
+*.db-wal
+*.db-shm
+*.log
