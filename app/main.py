@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 
+import aiohttp
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand
@@ -44,9 +46,12 @@ def build_dispatcher() -> Dispatcher:
 async def on_startup(bot: Bot) -> None:
     await db.init()
     await queue_manager.start()
-    await bot.set_my_commands(_COMMANDS)
-    me = await bot.get_me()
-    log.info("Bot @%s started", me.username)
+    try:
+        await bot.set_my_commands(_COMMANDS)
+        me = await bot.get_me()
+        log.info("Bot @%s started", me.username)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("on_startup: could not set commands: %s", exc)
 
 
 async def on_shutdown() -> None:
@@ -59,8 +64,12 @@ async def main() -> None:
     setup_logging()
     settings.validate()
 
+    session = AiohttpSession(
+        timeout=aiohttp.ClientTimeout(total=60, connect=15)
+    )
     bot = Bot(
         token=settings.bot_token,
+        session=session,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = build_dispatcher()
