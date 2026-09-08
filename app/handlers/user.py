@@ -76,7 +76,7 @@ async def cb_sub_check(callback: CallbackQuery, bot: Bot, lang: str) -> None:
     user_id = callback.from_user.id
     channels = await db.get_channels(only_active=True)
 
-    unsubscribed = await check_user_subscriptions(bot, user_id, channels) if channels else []
+    unsubscribed, _ = await check_user_subscriptions(bot, user_id, channels) if channels else ([], False)
     if unsubscribed:
         await callback.answer(t(lang, "subscribe_fail"), show_alert=True)
         return
