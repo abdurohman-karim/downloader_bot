@@ -22,25 +22,39 @@ def compute_snapshot(channels: list[dict]) -> str:
     return ",".join(sorted(str(c["channel_id"]) for c in channels))
 
 
-async def _is_member(bot: Bot, channel_id: str, user_id: int) -> bool:
+async def _is_member(bot: Bot, channel_id: str, user_id: int) -> tuple[bool, bool]:
+    """
+    Возвращает (is_member, had_error).
+    При ошибке API: is_member=True (не блокируем), had_error=True (не кэшируем результат).
+    """
     try:
         member = await bot.get_chat_member(channel_id, user_id)
-        return member.status in _SUBSCRIBED
+        return member.status in _SUBSCRIBED, False
     except Exception as exc:  # noqa: BLE001
-        log.warning("cannot check %s for %d: %s", channel_id, user_id, exc)
-        return True  # не наказываем пользователя за проблему на нашей стороне
+        log.error(
+            "subscription check failed for channel=%s user=%d — бот должен быть "
+            "администратором канала! Ошибка: %s",
+            channel_id, user_id, exc,
+        )
+        return True, True  # пропускаем, но не сохраняем снепшот
 
 
 async def check_user_subscriptions(
     bot: Bot, user_id: int, channels: list[dict]
-) -> list[dict]:
-    """Каналы, на которые пользователь не подписан. Проверки идут параллельно."""
+) -> tuple[list[dict], bool]:
+    """
+    Возвращает (unsubscribed_channels, had_errors).
+    Проверки идут параллельно.
+    """
     if not channels:
-        return []
+        return [], False
+
     results = await asyncio.gather(
         *(_is_member(bot, ch["channel_id"], user_id) for ch in channels)
     )
-    return [ch for ch, ok in zip(channels, results) if not ok]
+    unsubscribed = [ch for ch, (ok, _err) in zip(channels, results) if not ok]
+    had_errors = any(err for _ok, err in results)
+    return unsubscribed, had_errors
 
 
 def build_subscribe_message(
@@ -70,9 +84,13 @@ async def subscription_gate(
     if user and user["channels_snapshot"] == snapshot:
         return None
 
-    unsubscribed = await check_user_subscriptions(bot, user_id, channels)
+    unsubscribed, had_errors = await check_user_subscriptions(bot, user_id, channels)
     if not unsubscribed:
-        await db.upsert_user(user_id, channels_snapshot=snapshot)
+        if not had_errors:
+            # Сохраняем снепшот только если все проверки прошли без ошибок.
+            # При ошибках API (бот не admin канала) снепшот не кэшируем,
+            # чтобы при следующем сообщении снова попробовать проверить.
+            await db.upsert_user(user_id, channels_snapshot=snapshot)
         return None
 
     return build_subscribe_message(unsubscribed, lang)
