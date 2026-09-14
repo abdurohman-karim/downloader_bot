@@ -17,7 +17,11 @@ import dataclasses
 import logging
 import time
 
-from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+)
 from aiogram.types import FSInputFile, InputMediaPhoto, InputMediaVideo, Message
 
 from app.core.config import PLATFORM_EMOJIS, settings
@@ -36,6 +40,7 @@ MediaSpec = tuple[str | FSInputFile, str]
 
 
 async def safe_edit(msg: Message, text: str) -> None:
+    """Статусное сообщение — вспомогательное: его сбой не должен ронять задачу."""
     try:
         await msg.edit_text(text)
     except TelegramRetryAfter as exc:
@@ -44,6 +49,8 @@ async def safe_edit(msg: Message, text: str) -> None:
             await msg.edit_text(text)
     except TelegramBadRequest:
         pass  # сообщение не изменилось / удалено
+    except TelegramNetworkError as exc:
+        log.warning("status edit failed (network): %s", exc)
 
 
 def _sent_ids(messages: list[Message]) -> list[dict]:
@@ -286,6 +293,10 @@ class QueueManager:
         except TelegramBadRequest:
             await safe_edit(task.status_msg, t(task.lang, "error_send_failed"))
             self._total_err += 1
+        except TelegramNetworkError as exc:
+            log.warning("send failed (network) for %s: %s", task.url_key, exc)
+            await safe_edit(task.status_msg, t(task.lang, "err_network"))
+            self._total_err += 1
         finally:
             downloader.cleanup_result(result)
 
@@ -329,6 +340,10 @@ class QueueManager:
                 await db.save_cached_audio(task.url_key, file_id, result.title, result.duration)
         except TelegramBadRequest:
             await safe_edit(task.status_msg, t(task.lang, "error_send_failed"))
+            self._total_err += 1
+        except TelegramNetworkError as exc:
+            log.warning("send failed (network) for %s: %s", task.url_key, exc)
+            await safe_edit(task.status_msg, t(task.lang, "err_network"))
             self._total_err += 1
         finally:
             downloader.cleanup_result(result)

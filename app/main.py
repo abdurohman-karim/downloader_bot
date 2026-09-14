@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import socket
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand
@@ -62,8 +64,15 @@ async def main() -> None:
     setup_logging()
     settings.validate()
 
+    # IPv6 на хосте работает нестабильно (yt-dlp тоже ходит с force_ipv4), а DNS
+    # отдаёт AAAA-запись api.telegram.org первой — запросы периодически висят
+    # до таймаута. Принудительно IPv4. Таймаут — число секунд (не ClientTimeout).
+    session = AiohttpSession(timeout=30)
+    session._connector_init["family"] = socket.AF_INET  # noqa: SLF001 — публичного API нет
+
     bot = Bot(
         token=settings.bot_token,
+        session=session,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = build_dispatcher()
