@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from typing import Any, Iterable
@@ -54,6 +55,7 @@ CREATE TABLE IF NOT EXISTS video_cache (
     title      TEXT,
     duration   INTEGER,
     is_photo   INTEGER   DEFAULT 0,
+    items      TEXT,                 -- JSON [{file_id, type}] для каруселей
     hits       INTEGER   DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -100,18 +102,23 @@ class Database:
         )
         await self._db.commit()
 
-        # Migrate: add is_photo column for existing databases
-        try:
-            await self._db.execute(
-                "ALTER TABLE video_cache ADD COLUMN is_photo INTEGER DEFAULT 0"
-            )
-            await self._db.commit()
-        except Exception:  # noqa: BLE001 — column already exists
-            pass
+        await self._migrate()
 
         await self._load_settings_cache()
         self._flush_task = asyncio.create_task(self._flush_loop(), name="db-flush")
         log.info("Database ready: %s", settings.db_path)
+
+    async def _migrate(self) -> None:
+        """Добавляет колонки, появившиеся после создания таблицы (CREATE IF NOT EXISTS их не добавит)."""
+        async with self.conn.execute("PRAGMA table_info(video_cache)") as cur:
+            existing = {row[1] for row in await cur.fetchall()}
+        for column, ddl in (
+            ("is_photo", "INTEGER DEFAULT 0"),
+            ("items", "TEXT"),
+        ):
+            if column not in existing:
+                await self.conn.execute(f"ALTER TABLE video_cache ADD COLUMN {column} {ddl}")
+        await self.conn.commit()
 
     async def close(self) -> None:
         if self._flush_task:
@@ -253,8 +260,13 @@ class Database:
     # ── Кэш видео (file_id) ───────────────────────────────────────────────
 
     async def get_cached_video(self, url_key: str) -> dict | None:
+        """
+        Возвращает {file_id, title, duration, items}, где items —
+        список [{file_id, type: "video"|"photo"}] (для одиночного медиа — один элемент).
+        """
         async with self.conn.execute(
-            "SELECT file_id, title, duration, is_photo FROM video_cache WHERE url_key = ?",
+            "SELECT file_id, title, duration, is_photo, items "
+            "FROM video_cache WHERE url_key = ?",
             (url_key,),
         ) as cur:
             row = await cur.fetchone()
@@ -264,21 +276,39 @@ class Database:
             "UPDATE video_cache SET hits = hits + 1 WHERE url_key = ?", (url_key,)
         )
         await self.conn.commit()
-        return dict(row)
+
+        items = json.loads(row["items"]) if row["items"] else [
+            {"file_id": row["file_id"], "type": "photo" if row["is_photo"] else "video"}
+        ]
+        return {
+            "file_id": row["file_id"],
+            "title": row["title"],
+            "duration": row["duration"],
+            "items": items,
+        }
 
     async def save_cached_video(
         self,
         url_key: str,
-        file_id: str,
+        items: list[dict],
         title: str | None,
         duration: int | None,
-        *,
-        is_photo: bool = False,
     ) -> None:
+        """items — [{file_id, type}] в порядке отправки."""
+        if not items:
+            return
+        first = items[0]
         await self.conn.execute(
-            "INSERT OR REPLACE INTO video_cache (url_key, file_id, title, duration, is_photo) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (url_key, file_id, title, duration, int(is_photo)),
+            "INSERT OR REPLACE INTO video_cache "
+            "(url_key, file_id, title, duration, is_photo, items) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                url_key,
+                first["file_id"],
+                title,
+                duration,
+                int(first["type"] == "photo"),
+                json.dumps(items) if len(items) > 1 else None,
+            ),
         )
         await self.conn.commit()
 

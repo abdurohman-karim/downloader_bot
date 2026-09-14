@@ -13,7 +13,13 @@ from app.core.config import LANGUAGES, PLATFORM_EMOJIS, settings
 from app.db.database import db
 from app.keyboards.user import language_kb
 from app.locales import t
-from app.services.queue import DownloadTask, queue_manager, safe_edit
+from app.services.queue import (
+    DownloadTask,
+    cached_items,
+    queue_manager,
+    safe_edit,
+    send_items,
+)
 from app.services.subscription import (
     check_user_subscriptions,
     compute_snapshot,
@@ -144,10 +150,7 @@ async def handle_link(msg: Message, bot: Bot, lang: str) -> None:
         if cached:
             caption = build_caption(cached["title"], cached["duration"], platform, emoji)
             try:
-                if cached.get("is_photo"):
-                    await msg.reply_photo(photo=cached["file_id"], caption=caption)
-                else:
-                    await msg.reply_video(video=cached["file_id"], caption=caption)
+                await send_items(msg, cached_items(cached), caption)
                 return
             except TelegramBadRequest as exc:
                 log.info("stale file_id for %s: %s", key, exc)

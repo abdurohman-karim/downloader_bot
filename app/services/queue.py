@@ -18,7 +18,7 @@ import logging
 import time
 
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
-from aiogram.types import FSInputFile, Message
+from aiogram.types import FSInputFile, InputMediaPhoto, InputMediaVideo, Message
 
 from app.core.config import PLATFORM_EMOJIS, settings
 from app.db.database import db
@@ -27,6 +27,11 @@ from app.services.downloader import DownloadResult, downloader
 from app.utils.text import build_caption
 
 log = logging.getLogger(__name__)
+
+_MEDIA_GROUP_MAX = 10  # лимит Telegram на альбом
+
+#: (media, type) — media: путь-FSInputFile при первой отправке или file_id из кэша.
+MediaSpec = tuple[str | FSInputFile, str]
 
 
 async def safe_edit(msg: Message, text: str) -> None:
@@ -38,6 +43,50 @@ async def safe_edit(msg: Message, text: str) -> None:
             await msg.edit_text(text)
     except TelegramBadRequest:
         pass  # сообщение не изменилось / удалено
+
+
+def _sent_ids(messages: list[Message]) -> list[dict]:
+    out: list[dict] = []
+    for m in messages:
+        if m.video:
+            out.append({"file_id": m.video.file_id, "type": "video"})
+        elif m.photo:
+            out.append({"file_id": m.photo[-1].file_id, "type": "photo"})
+    return out
+
+
+async def send_items(reply_to: Message, items: list[MediaSpec], caption: str) -> list[dict]:
+    """
+    Отправляет одно медиа или альбом(ы) по 10 штук.
+    Возвращает [{file_id, type}] в порядке отправки — для кэша.
+    """
+    if len(items) == 1:
+        media, kind = items[0]
+        if kind == "video":
+            sent = await reply_to.reply_video(video=media, caption=caption)
+        else:
+            sent = await reply_to.reply_photo(photo=media, caption=caption)
+        return _sent_ids([sent])
+
+    out: list[dict] = []
+    for start in range(0, len(items), _MEDIA_GROUP_MAX):
+        group = []
+        for j, (media, kind) in enumerate(items[start : start + _MEDIA_GROUP_MAX]):
+            cap = caption if start == 0 and j == 0 else None
+            cls = InputMediaVideo if kind == "video" else InputMediaPhoto
+            group.append(cls(media=media, caption=cap))
+        out.extend(_sent_ids(await reply_to.reply_media_group(media=group)))
+    return out
+
+
+def result_items(result: DownloadResult) -> list[MediaSpec]:
+    if result.path:
+        return [(FSInputFile(result.path), "video")]
+    return [(FSInputFile(it.path), "video" if it.is_video else "photo") for it in result.items]
+
+
+def cached_items(cached: dict) -> list[MediaSpec]:
+    return [(it["file_id"], it["type"]) for it in cached["items"]]
 
 
 @dataclasses.dataclass
@@ -183,35 +232,20 @@ class QueueManager:
         try:
             await safe_edit(task.status_msg, t(task.lang, "sending"))
             caption = build_caption(result.title, result.duration, task.platform, emoji)
-            if result.is_photo:
-                sent = await task.reply_to.reply_photo(
-                    photo=FSInputFile(result.path),
-                    caption=caption,
-                )
-                cached_file_id = sent.photo[-1].file_id if sent.photo else None
-            else:
-                sent = await task.reply_to.reply_video(
-                    video=FSInputFile(result.path),
-                    caption=caption,
-                )
-                cached_file_id = sent.video.file_id if sent.video else None
+            sent_ids = await send_items(task.reply_to, result_items(result), caption)
             with contextlib.suppress(Exception):
                 await task.status_msg.delete()
             self._total_ok += 1
 
-            if settings.file_cache_enabled and cached_file_id:
+            if settings.file_cache_enabled and sent_ids:
                 await db.save_cached_video(
-                    task.url_key,
-                    cached_file_id,
-                    result.title,
-                    result.duration,
-                    is_photo=result.is_photo,
+                    task.url_key, sent_ids, result.title, result.duration
                 )
         except TelegramBadRequest:
             await safe_edit(task.status_msg, t(task.lang, "error_send_failed"))
             self._total_err += 1
         finally:
-            downloader.cleanup(result.path)
+            downloader.cleanup_result(result)
 
     # ── Кэш file_id ───────────────────────────────────────────────────────
 
@@ -224,16 +258,7 @@ class QueueManager:
         emoji = PLATFORM_EMOJIS.get(task.platform, "🌐")
         caption = build_caption(cached["title"], cached["duration"], task.platform, emoji)
         try:
-            if cached.get("is_photo"):
-                await task.reply_to.reply_photo(
-                    photo=cached["file_id"],
-                    caption=caption,
-                )
-            else:
-                await task.reply_to.reply_video(
-                    video=cached["file_id"],
-                    caption=caption,
-                )
+            await send_items(task.reply_to, cached_items(cached), caption)
         except TelegramBadRequest as exc:
             log.info("stale file_id for %s: %s", task.url_key, exc)
             await db.drop_cached_video(task.url_key)

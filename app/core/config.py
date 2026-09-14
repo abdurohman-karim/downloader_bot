@@ -58,6 +58,7 @@ class Settings:
     max_workers: int = field(default_factory=lambda: _env_int("MAX_WORKERS", 15))
     max_queue_size: int = field(default_factory=lambda: _env_int("MAX_QUEUE_SIZE", 500))
     max_user_tasks: int = field(default_factory=lambda: _env_int("MAX_USER_TASKS", 2))
+    max_gallery_items: int = field(default_factory=lambda: _env_int("MAX_GALLERY_ITEMS", 20))
     download_timeout: int = field(default_factory=lambda: _env_int("DOWNLOAD_TIMEOUT", 180))
     max_wait_time: int = field(default_factory=lambda: _env_int("MAX_WAIT_TIME", 600))
     throttle_seconds: float = field(default_factory=lambda: _env_int("THROTTLE_MS", 700) / 1000)
