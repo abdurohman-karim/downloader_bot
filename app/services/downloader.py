@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -87,23 +88,37 @@ _ERROR_MAP: tuple[tuple[str, str], ...] = (
 )
 
 
+#: Telegram-клиенты (iOS, Desktop, часть Android) не декодируют VP9 / AV1 / HEVC
+#: внутри mp4 — видео «замирает» на первом кадре, играет только звук.
+#: yt-dlp по умолчанию ранжирует av01 > vp9 > h265 > h264, поэтому
+#: эти кодеки исключаем явно. `?` — пропускать форматы с неизвестным кодеком
+#: (у прогрессивных mp4 Instagram vcodec не заполнен, а по факту это H.264).
+_SAFE_V = "[vcodec!^=?vp][vcodec!^=?av01][vcodec!^=?hev][vcodec!^=?hvc][vcodec!^=?h265]"
+_SAFE_A = "[acodec!^=?opus]"
+_BAD_VCODECS = ("vp8", "vp9", "av1", "hevc", "h265")
+
+
 class VideoDownloader:
-    #: Быстрый путь — один селектор, отсекающий заведомо большие форматы.
+    #: Один селектор на весь «обычный» случай — одна экстракция вместо перебора.
+    #: Прогрессивный H.264 (видео+звук в одном файле) предпочтительнее склейки
+    #: DASH: не нужен ffmpeg, и Telegram гарантированно его играет.
     _PRIMARY_FORMAT = (
-        "bv*[filesize<{limit}][height<=1080]+ba/"
-        "b[filesize<{limit}]/"
-        "bv*[filesize_approx<{limit}][height<=1080]+ba/"
-        "b[filesize_approx<{limit}]"
+        f"b{_SAFE_V}[filesize<{{limit}}][height<=?1080]/"
+        f"bv*{_SAFE_V}[filesize<{{limit}}][height<=1080]+ba{_SAFE_A}/"
+        f"b{_SAFE_V}[height<=?1080]/"
+        f"bv*{_SAFE_V}[height<=1080]+ba{_SAFE_A}/"
+        f"b{_SAFE_V}"
     )
 
-    #: Резервная цепочка: 720p → 480p → 360p → худшее.
+    #: Если файл вылез за лимит: 720p → 480p → худшее «безопасное» → вообще худшее.
     _FALLBACK_CHAIN: tuple[str, ...] = (
-        "bv*[width<=1280][height<=720]+ba/b[width<=1280][height<=720]"
-        "/bv*[width<=720][height<=1280]+ba/b[width<=720][height<=1280]",
-        "bv*[width<=854][height<=480]+ba/b[width<=854][height<=480]"
-        "/bv*[width<=480][height<=854]+ba/b[width<=480][height<=854]",
-        "b[ext=mp4]/b",
-        "worst",
+        f"b{_SAFE_V}[height<=?720][width<=?1280]/"
+        f"bv*{_SAFE_V}[height<=720][width<=1280]+ba{_SAFE_A}/"
+        f"bv*{_SAFE_V}[height<=1280][width<=720]+ba{_SAFE_A}",
+        f"b{_SAFE_V}[height<=?480][width<=?854]/"
+        f"bv*{_SAFE_V}[height<=480][width<=854]+ba{_SAFE_A}/"
+        f"bv*{_SAFE_V}[height<=854][width<=480]+ba{_SAFE_A}",
+        f"worst{_SAFE_V}/worst",
     )
 
     _AUDIO_BITRATE = 192  # kbps mp3
@@ -175,11 +190,53 @@ class VideoDownloader:
 
             if res.path:
                 if Path(res.path).stat().st_size <= limit:
-                    return res
+                    res.path = await self._ensure_playable(res.path)
+                    if Path(res.path).stat().st_size <= limit:
+                        return res
                 self.cleanup(res.path)
                 last_error = "err_too_big"
 
         return DownloadResult(error=last_error or "err_too_big")
+
+    async def _ensure_playable(self, path: str) -> str:
+        """Страховка: если селектор всё же отдал VP9/AV1/HEVC — перекодируем в H.264."""
+        loop = asyncio.get_running_loop()
+        try:
+            codec = await loop.run_in_executor(self._pool, self._probe_vcodec, path)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ffprobe failed for %s: %s", path, exc)
+            return path
+        if codec not in _BAD_VCODECS:
+            return path
+
+        log.warning("got %s stream in %s — transcoding to h264", codec, path)
+        try:
+            new_path = await loop.run_in_executor(self._pool, self._transcode_h264, path)
+        except Exception as exc:  # noqa: BLE001
+            log.error("transcode failed for %s: %s", path, exc)
+            return path
+        Path(path).unlink(missing_ok=True)
+        return new_path
+
+    @staticmethod
+    def _probe_vcodec(path: str) -> str | None:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name", "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        return out.stdout.strip().splitlines()[0] if out.stdout.strip() else None
+
+    @staticmethod
+    def _transcode_h264(src: str) -> str:
+        dst = str(Path(src).with_name(Path(src).stem + "_h264.mp4"))
+        subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-i", src,
+             "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p",
+             "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", dst],
+            capture_output=True, text=True, timeout=settings.download_timeout, check=True,
+        )
+        return dst
 
     async def download_audio(self, url: str) -> DownloadResult:
         """Извлекает звуковую дорожку в mp3 (через ffmpeg)."""
@@ -350,6 +407,8 @@ class VideoDownloader:
             if f.get("protocol") == "http_dash_segments":
                 continue
             if f.get("vcodec") == "none" or f.get("acodec") == "none":
+                continue
+            if str(f.get("vcodec") or "").startswith(("vp", "av01", "hev", "hvc", "h265")):
                 continue
             size = f.get("filesize") or f.get("filesize_approx")
             if size and size > limit:
