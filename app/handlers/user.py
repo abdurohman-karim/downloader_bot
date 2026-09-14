@@ -18,6 +18,7 @@ from app.services.queue import (
     cached_items,
     queue_manager,
     safe_edit,
+    send_audio,
     send_items,
 )
 from app.services.subscription import (
@@ -143,6 +144,7 @@ async def handle_link(msg: Message, bot: Bot, lang: str) -> None:
     platform = platform_of(url)
     emoji = PLATFORM_EMOJIS.get(platform, "🌐")
     key = cache_key(url)
+    link_id = await db.link_id(url)  # для callback-кнопки «MP3»
 
     # Быстрый путь: медиа уже загружали — отдаём по file_id, без очереди.
     if settings.file_cache_enabled:
@@ -150,7 +152,7 @@ async def handle_link(msg: Message, bot: Bot, lang: str) -> None:
         if cached:
             caption = build_caption(cached["title"], cached["duration"], platform, emoji)
             try:
-                await send_items(msg, cached_items(cached), caption)
+                await send_items(msg, cached_items(cached), caption, link_id, lang)
                 return
             except TelegramBadRequest as exc:
                 log.info("stale file_id for %s: %s", key, exc)
@@ -165,6 +167,7 @@ async def handle_link(msg: Message, bot: Bot, lang: str) -> None:
         lang=lang,
         reply_to=msg,
         status_msg=status,
+        link_id=link_id,
     )
 
     ok, payload = await queue_manager.enqueue(task)
@@ -175,5 +178,70 @@ async def handle_link(msg: Message, bot: Bot, lang: str) -> None:
     position = int(payload)
     if position <= settings.max_workers:
         await safe_edit(status, t(lang, "downloading", emoji=emoji, platform=platform))
+    else:
+        await safe_edit(status, t(lang, "in_queue", pos=position))
+
+
+# ── Видео → MP3 (кнопка под видео) ────────────────────────────────────────────
+
+@user_router.callback_query(F.data.startswith("audio:"))
+async def cb_audio(callback: CallbackQuery, bot: Bot, lang: str) -> None:
+    try:
+        url = await db.link_url(int(callback.data.split(":", 1)[1]))
+    except ValueError:
+        url = None
+    if not url:
+        await callback.answer(t(lang, "err_unknown"), show_alert=True)
+        return
+
+    user_id = callback.from_user.id
+    await db.ensure_user(user_id)
+
+    gate = await subscription_gate(bot, user_id, lang)
+    if gate:
+        text, kb = gate
+        await callback.message.answer(text, reply_markup=kb)
+        await callback.answer()
+        return
+
+    platform = platform_of(url)
+    emoji = PLATFORM_EMOJIS.get(platform, "🌐")
+    key = cache_key(url)
+
+    if settings.file_cache_enabled:
+        cached = await db.get_cached_audio(key)
+        if cached:
+            caption = build_caption(cached["title"], cached["duration"], platform, emoji)
+            try:
+                await send_audio(
+                    callback.message, cached["file_id"], caption, cached["title"], cached["duration"]
+                )
+                await callback.answer()
+                return
+            except TelegramBadRequest as exc:
+                log.info("stale audio file_id for %s: %s", key, exc)
+                await db.drop_cached_audio(key)
+
+    status = await callback.message.reply(t(lang, "adding_to_queue"))
+    task = DownloadTask(
+        user_id=user_id,
+        url=url,
+        url_key=key,
+        platform=platform,
+        lang=lang,
+        reply_to=callback.message,
+        status_msg=status,
+        mode="audio",
+    )
+
+    ok, payload = await queue_manager.enqueue(task)
+    await callback.answer()
+    if not ok:
+        await safe_edit(status, str(payload))
+        return
+
+    position = int(payload)
+    if position <= settings.max_workers:
+        await safe_edit(status, t(lang, "extracting_audio"))
     else:
         await safe_edit(status, t(lang, "in_queue", pos=position))

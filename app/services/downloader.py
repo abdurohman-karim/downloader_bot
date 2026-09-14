@@ -45,6 +45,7 @@ class DownloadResult:
     items: list[MediaItem] = field(default_factory=list)  # фото / карусель
     title: str | None = None
     duration: int | None = None
+    uploader: str | None = None       # исполнитель для аудио
     error: str | None = None          # ключ i18n, напр. "err_private"
     detail: str | None = None         # сырой текст для логов
 
@@ -104,6 +105,8 @@ class VideoDownloader:
         "b[ext=mp4]/b",
         "worst",
     )
+
+    _AUDIO_BITRATE = 192  # kbps mp3
 
     _HTTP_HEADERS = {
         "User-Agent": (
@@ -177,6 +180,48 @@ class VideoDownloader:
                 last_error = "err_too_big"
 
         return DownloadResult(error=last_error or "err_too_big")
+
+    async def download_audio(self, url: str) -> DownloadResult:
+        """Извлекает звуковую дорожку в mp3 (через ffmpeg)."""
+        uid = uuid.uuid4().hex[:12]
+        opts = {
+            **self._BASE_OPTS,
+            "outtmpl": str(self._dir / f"{uid}.%(ext)s"),
+            "format": "bestaudio/best",
+            "http_headers": self._HTTP_HEADERS,
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": str(self._AUDIO_BITRATE),
+            }],
+        }
+        opts.pop("merge_output_format", None)
+
+        loop = asyncio.get_running_loop()
+        try:
+            info = await loop.run_in_executor(self._pool, self._sync_dl, url, opts)
+        except yt_dlp.utils.DownloadError as exc:
+            raw = str(exc)
+            return DownloadResult(error=self._classify(raw), detail=raw)
+        except Exception as exc:  # noqa: BLE001
+            raw = str(exc)
+            log.warning("yt-dlp audio failed: %s", raw[:200])
+            return DownloadResult(error=self._classify(raw), detail=raw)
+
+        path = self._dir / f"{uid}.mp3"
+        if not path.exists():
+            self.cleanup(str(path))
+            return DownloadResult(error="err_unknown", detail="mp3 not found after extraction")
+        if path.stat().st_size > settings.max_file_size:
+            self.cleanup(str(path))
+            return DownloadResult(error="err_too_big")
+
+        return DownloadResult(
+            path=str(path),
+            title=info.get("title") if info else None,
+            duration=info.get("duration") if info else None,
+            uploader=(info.get("uploader") or info.get("channel")) if info else None,
+        )
 
     @staticmethod
     def cleanup(path: str | None) -> None:

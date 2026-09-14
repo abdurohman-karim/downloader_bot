@@ -9,11 +9,15 @@ TEXTS: dict[str, dict[str, str]] = {
         "send_link": (
             "📎 Отправьте ссылку на видео с <b>TikTok</b> или <b>Instagram</b> —\n"
             "я скачаю его и пришлю прямо сюда.\n\n"
+            "🎧 Под каждым видео есть кнопка <b>«Скачать MP3»</b> — она пришлёт звуковую дорожку.\n\n"
             "⚠️ Максимальный размер файла: <b>50 МБ</b>"
         ),
         "adding_to_queue": "⏳ Добавляю в очередь…",
         "downloading": "{emoji} Загружаю с {platform}…",
         "sending": "📤 Отправляю…",
+        "audio_btn": "🎧 Скачать MP3",
+        "extracting_audio": "🎧 Извлекаю аудио…",
+        "audio_photo_only": "В этом посте нет видео — аудио извлечь не из чего.",
         "in_queue": "⏳ В очереди: позиция <b>{pos}</b>",
         "bot_disabled": "🛠 Бот временно на техобслуживании. Попробуйте позже.",
         "error_unsupported": "⚠️ Поддерживаются только ссылки с <b>TikTok</b> и <b>Instagram</b>.",
@@ -42,8 +46,9 @@ TEXTS: dict[str, dict[str, str]] = {
         "subscribe_fail": "❌ Вы ещё не подписались на все каналы.",
         "help_text": (
             "ℹ️ <b>Как пользоваться</b>\n\n"
-            "Отправьте ссылку на видео — бот скачает и пришлёт файл.\n\n"
-            "<b>Платформы:</b>\n• TikTok\n• Instagram Reels и Posts\n\n"
+            "Отправьте ссылку — бот скачает и пришлёт файл.\n\n"
+            "<b>Платформы:</b>\n• TikTok\n• Instagram Reels, фото и карусели\n\n"
+            "<b>🎧 Видео → MP3:</b>\nпод каждым видео есть кнопка «Скачать MP3» — нажмите, и бот пришлёт аудио.\n\n"
             "<b>Ограничения:</b>\n"
             "• Максимальный размер: <b>50 МБ</b>\n"
             "• Приватные видео и видео с авторскими правами не загружаются\n\n"
@@ -64,11 +69,15 @@ TEXTS: dict[str, dict[str, str]] = {
         "send_link": (
             "📎 Send a link to a video from <b>TikTok</b> or <b>Instagram</b> —\n"
             "I'll download it and send it right here.\n\n"
+            "🎧 Every video comes with a <b>“Get MP3”</b> button that sends the audio track.\n\n"
             "⚠️ Maximum file size: <b>50 MB</b>"
         ),
         "adding_to_queue": "⏳ Adding to the queue…",
         "downloading": "{emoji} Downloading from {platform}…",
         "sending": "📤 Sending…",
+        "audio_btn": "🎧 Get MP3",
+        "extracting_audio": "🎧 Extracting audio…",
+        "audio_photo_only": "This post has no video — nothing to extract audio from.",
         "in_queue": "⏳ In queue: position <b>{pos}</b>",
         "bot_disabled": "🛠 The bot is under maintenance. Please try again later.",
         "error_unsupported": "⚠️ Only <b>TikTok</b> and <b>Instagram</b> links are supported.",
@@ -97,8 +106,9 @@ TEXTS: dict[str, dict[str, str]] = {
         "subscribe_fail": "❌ You haven't subscribed to all channels yet.",
         "help_text": (
             "ℹ️ <b>How to use</b>\n\n"
-            "Send a video link — the bot will download and send the file.\n\n"
-            "<b>Platforms:</b>\n• TikTok\n• Instagram Reels and Posts\n\n"
+            "Send a link — the bot will download and send the file.\n\n"
+            "<b>Platforms:</b>\n• TikTok\n• Instagram Reels, photos and carousels\n\n"
+            "<b>🎧 Video → MP3:</b>\nevery video has a “Get MP3” button — press it and the bot sends the audio.\n\n"
             "<b>Limits:</b>\n"
             "• Maximum size: <b>50 MB</b>\n"
             "• Private and copyrighted videos cannot be downloaded\n\n"
@@ -119,11 +129,15 @@ TEXTS: dict[str, dict[str, str]] = {
         "send_link": (
             "📎 <b>TikTok</b> yoki <b>Instagram</b>dan video havolasini yuboring —\n"
             "men uni yuklab, shu yerga yuboraman.\n\n"
+            "🎧 Har bir video ostida <b>«MP3 yuklab olish»</b> tugmasi bor — u audio yo'lakni yuboradi.\n\n"
             "⚠️ Maksimal fayl hajmi: <b>50 MB</b>"
         ),
         "adding_to_queue": "⏳ Navbatga qo'shilmoqda…",
         "downloading": "{emoji} {platform}dan yuklanmoqda…",
         "sending": "📤 Yuborilmoqda…",
+        "audio_btn": "🎧 MP3 yuklab olish",
+        "extracting_audio": "🎧 Audio ajratilmoqda…",
+        "audio_photo_only": "Bu postda video yo'q — audio ajratib bo'lmaydi.",
         "in_queue": "⏳ Navbatda: <b>{pos}</b>-o'rin",
         "bot_disabled": "🛠 Bot texnik xizmatda. Keyinroq urinib ko'ring.",
         "error_unsupported": "⚠️ Faqat <b>TikTok</b> va <b>Instagram</b> havolalari qo'llab-quvvatlanadi.",
@@ -152,8 +166,9 @@ TEXTS: dict[str, dict[str, str]] = {
         "subscribe_fail": "❌ Siz hali barcha kanallarga obuna bo'lmadingiz.",
         "help_text": (
             "ℹ️ <b>Qanday foydalanish kerak</b>\n\n"
-            "Video havolasini yuboring — bot faylni yuklab, shu yerga yuboradi.\n\n"
-            "<b>Platformalar:</b>\n• TikTok\n• Instagram Reels va Posts\n\n"
+            "Havolani yuboring — bot faylni yuklab, shu yerga yuboradi.\n\n"
+            "<b>Platformalar:</b>\n• TikTok\n• Instagram Reels, rasmlar va karusellar\n\n"
+            "<b>🎧 Video → MP3:</b>\nhar bir video ostida «MP3 yuklab olish» tugmasi bor — bosing, bot audioni yuboradi.\n\n"
             "<b>Cheklovlar:</b>\n"
             "• Maksimal hajm: <b>50 MB</b>\n"
             "• Shaxsiy videolar yuklab olinmaydi\n\n"

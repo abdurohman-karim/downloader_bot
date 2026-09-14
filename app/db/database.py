@@ -59,6 +59,22 @@ CREATE TABLE IF NOT EXISTS video_cache (
     hits       INTEGER   DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Кэш извлечённого аудио (mp3) по той же ссылке.
+CREATE TABLE IF NOT EXISTS audio_cache (
+    url_key    TEXT PRIMARY KEY,
+    file_id    TEXT NOT NULL,
+    title      TEXT,
+    duration   INTEGER,
+    hits       INTEGER   DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Короткий id ссылки для callback_data (лимит 64 байта, URL туда не влезает).
+CREATE TABLE IF NOT EXISTS links (
+    id  INTEGER PRIMARY KEY AUTOINCREMENT,
+    url TEXT UNIQUE NOT NULL
+);
 """
 
 _DEFAULT_SETTINGS = {
@@ -315,6 +331,52 @@ class Database:
     async def drop_cached_video(self, url_key: str) -> None:
         await self.conn.execute("DELETE FROM video_cache WHERE url_key = ?", (url_key,))
         await self.conn.commit()
+
+    # ── Кэш аудио (file_id) ───────────────────────────────────────────────
+
+    async def get_cached_audio(self, url_key: str) -> dict | None:
+        async with self.conn.execute(
+            "SELECT file_id, title, duration FROM audio_cache WHERE url_key = ?",
+            (url_key,),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            return None
+        await self.conn.execute(
+            "UPDATE audio_cache SET hits = hits + 1 WHERE url_key = ?", (url_key,)
+        )
+        await self.conn.commit()
+        return dict(row)
+
+    async def save_cached_audio(
+        self, url_key: str, file_id: str, title: str | None, duration: int | None
+    ) -> None:
+        await self.conn.execute(
+            "INSERT OR REPLACE INTO audio_cache (url_key, file_id, title, duration) "
+            "VALUES (?, ?, ?, ?)",
+            (url_key, file_id, title, duration),
+        )
+        await self.conn.commit()
+
+    async def drop_cached_audio(self, url_key: str) -> None:
+        await self.conn.execute("DELETE FROM audio_cache WHERE url_key = ?", (url_key,))
+        await self.conn.commit()
+
+    # ── Короткие id ссылок ────────────────────────────────────────────────
+
+    async def link_id(self, url: str) -> int:
+        await self.conn.execute("INSERT OR IGNORE INTO links (url) VALUES (?)", (url,))
+        await self.conn.commit()
+        async with self.conn.execute("SELECT id FROM links WHERE url = ?", (url,)) as cur:
+            row = await cur.fetchone()
+        return int(row[0])
+
+    async def link_url(self, link_id: int) -> str | None:
+        async with self.conn.execute(
+            "SELECT url FROM links WHERE id = ?", (link_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return row[0] if row else None
 
     # ── Stats ─────────────────────────────────────────────────────────────
 

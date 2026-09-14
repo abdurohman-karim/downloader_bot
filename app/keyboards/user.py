@@ -18,6 +18,15 @@ def language_kb() -> InlineKeyboardMarkup:
     )
 
 
+def audio_kb(link_id: int, lang: str) -> InlineKeyboardMarkup:
+    """Кнопка под видео: получить звуковую дорожку в mp3."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=t(lang, "audio_btn"), callback_data=f"audio:{link_id}")]
+        ]
+    )
+
+
 def subscribe_kb(channels: list[dict], lang: str) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for ch in channels:

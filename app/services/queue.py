@@ -22,9 +22,10 @@ from aiogram.types import FSInputFile, InputMediaPhoto, InputMediaVideo, Message
 
 from app.core.config import PLATFORM_EMOJIS, settings
 from app.db.database import db
+from app.keyboards.user import audio_kb
 from app.locales import t
 from app.services.downloader import DownloadResult, downloader
-from app.utils.text import build_caption
+from app.utils.text import build_caption, safe_filename
 
 log = logging.getLogger(__name__)
 
@@ -55,15 +56,26 @@ def _sent_ids(messages: list[Message]) -> list[dict]:
     return out
 
 
-async def send_items(reply_to: Message, items: list[MediaSpec], caption: str) -> list[dict]:
+async def send_items(
+    reply_to: Message,
+    items: list[MediaSpec],
+    caption: str,
+    link_id: int | None = None,
+    lang: str = "ru",
+) -> list[dict]:
     """
     Отправляет одно медиа или альбом(ы) по 10 штук.
+    Под одиночным видео — кнопка «MP3» (альбомы inline-клавиатуру не поддерживают).
     Возвращает [{file_id, type}] в порядке отправки — для кэша.
     """
     if len(items) == 1:
         media, kind = items[0]
         if kind == "video":
-            sent = await reply_to.reply_video(video=media, caption=caption)
+            sent = await reply_to.reply_video(
+                video=media,
+                caption=caption,
+                reply_markup=audio_kb(link_id, lang) if link_id is not None else None,
+            )
         else:
             sent = await reply_to.reply_photo(photo=media, caption=caption)
         return _sent_ids([sent])
@@ -89,6 +101,25 @@ def cached_items(cached: dict) -> list[MediaSpec]:
     return [(it["file_id"], it["type"]) for it in cached["items"]]
 
 
+async def send_audio(
+    reply_to: Message,
+    audio: str | FSInputFile,
+    caption: str,
+    title: str | None,
+    duration: int | None,
+    performer: str | None = None,
+) -> str | None:
+    """Отправляет mp3 (файл или file_id), возвращает file_id для кэша."""
+    sent = await reply_to.reply_audio(
+        audio=audio,
+        caption=caption,
+        title=title,
+        performer=performer,
+        duration=duration,
+    )
+    return sent.audio.file_id if sent.audio else None
+
+
 @dataclasses.dataclass
 class DownloadTask:
     user_id: int
@@ -98,7 +129,13 @@ class DownloadTask:
     lang: str
     reply_to: Message
     status_msg: Message
+    link_id: int | None = None
+    mode: str = "video"               # "video" | "audio"
     enqueued_at: float = dataclasses.field(default_factory=time.monotonic)
+
+    @property
+    def inflight_key(self) -> str:
+        return f"{self.mode}:{self.url_key}"
 
 
 class QueueManager:
@@ -191,7 +228,7 @@ class QueueManager:
             return
 
         # Ту же ссылку уже качает другой воркер — дожидаемся его результата.
-        event = self._inflight.get(task.url_key)
+        event = self._inflight.get(task.inflight_key)
         if event is not None:
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(event.wait(), timeout=settings.download_timeout)
@@ -199,11 +236,14 @@ class QueueManager:
                 return
 
         own_event = asyncio.Event()
-        self._inflight[task.url_key] = own_event
+        self._inflight[task.inflight_key] = own_event
         try:
-            await self._download_and_send(task)
+            if task.mode == "audio":
+                await self._extract_and_send_audio(task)
+            else:
+                await self._download_and_send(task)
         finally:
-            self._inflight.pop(task.url_key, None)
+            self._inflight.pop(task.inflight_key, None)
             own_event.set()
 
     async def _download_and_send(self, task: DownloadTask) -> None:
@@ -232,7 +272,9 @@ class QueueManager:
         try:
             await safe_edit(task.status_msg, t(task.lang, "sending"))
             caption = build_caption(result.title, result.duration, task.platform, emoji)
-            sent_ids = await send_items(task.reply_to, result_items(result), caption)
+            sent_ids = await send_items(
+                task.reply_to, result_items(result), caption, task.link_id, task.lang
+            )
             with contextlib.suppress(Exception):
                 await task.status_msg.delete()
             self._total_ok += 1
@@ -247,21 +289,78 @@ class QueueManager:
         finally:
             downloader.cleanup_result(result)
 
+    async def _extract_and_send_audio(self, task: DownloadTask) -> None:
+        emoji = PLATFORM_EMOJIS.get(task.platform, "🌐")
+        await safe_edit(task.status_msg, t(task.lang, "extracting_audio"))
+
+        try:
+            result: DownloadResult = await asyncio.wait_for(
+                downloader.download_audio(task.url), timeout=settings.download_timeout
+            )
+        except asyncio.TimeoutError:
+            await safe_edit(task.status_msg, t(task.lang, "error_timeout"))
+            self._total_err += 1
+            return
+
+        if not result.ok:
+            if result.detail:
+                log.info("audio failed [%s]: %s", result.error, result.detail[:200])
+            key = result.error or "err_unknown"
+            if "no video in this post" in (result.detail or "").lower():
+                key = "audio_photo_only"  # фото-пост: звука там нет
+            await safe_edit(task.status_msg, t(task.lang, key))
+            self._total_err += 1
+            return
+
+        try:
+            await safe_edit(task.status_msg, t(task.lang, "sending"))
+            file_id = await send_audio(
+                task.reply_to,
+                FSInputFile(result.path, filename=safe_filename(result.title, "mp3")),
+                build_caption(result.title, result.duration, task.platform, emoji),
+                result.title,
+                result.duration,
+                result.uploader,
+            )
+            with contextlib.suppress(Exception):
+                await task.status_msg.delete()
+            self._total_ok += 1
+            if settings.file_cache_enabled and file_id:
+                await db.save_cached_audio(task.url_key, file_id, result.title, result.duration)
+        except TelegramBadRequest:
+            await safe_edit(task.status_msg, t(task.lang, "error_send_failed"))
+            self._total_err += 1
+        finally:
+            downloader.cleanup_result(result)
+
     # ── Кэш file_id ───────────────────────────────────────────────────────
 
     async def _try_send_cached(self, task: DownloadTask) -> bool:
         if not settings.file_cache_enabled:
             return False
-        cached = await db.get_cached_video(task.url_key)
+        if task.mode == "audio":
+            cached = await db.get_cached_audio(task.url_key)
+        else:
+            cached = await db.get_cached_video(task.url_key)
         if not cached:
             return False
         emoji = PLATFORM_EMOJIS.get(task.platform, "🌐")
         caption = build_caption(cached["title"], cached["duration"], task.platform, emoji)
         try:
-            await send_items(task.reply_to, cached_items(cached), caption)
+            if task.mode == "audio":
+                await send_audio(
+                    task.reply_to, cached["file_id"], caption, cached["title"], cached["duration"]
+                )
+            else:
+                await send_items(
+                    task.reply_to, cached_items(cached), caption, task.link_id, task.lang
+                )
         except TelegramBadRequest as exc:
-            log.info("stale file_id for %s: %s", task.url_key, exc)
-            await db.drop_cached_video(task.url_key)
+            log.info("stale %s file_id for %s: %s", task.mode, task.url_key, exc)
+            if task.mode == "audio":
+                await db.drop_cached_audio(task.url_key)
+            else:
+                await db.drop_cached_video(task.url_key)
             return False
         with contextlib.suppress(Exception):
             await task.status_msg.delete()

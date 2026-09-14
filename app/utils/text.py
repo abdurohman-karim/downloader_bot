@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import re
 
 
 def format_duration(secs: int | None) -> str:
@@ -16,6 +17,16 @@ def format_duration(secs: int | None) -> str:
 def esc(value: object) -> str:
     """Экранирование пользовательских/внешних данных для parse_mode=HTML."""
     return html.escape(str(value), quote=False)
+
+
+_FILENAME_BAD = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
+
+
+def safe_filename(title: str | None, ext: str, fallback: str = "audio") -> str:
+    """Имя файла для Telegram из заголовка: без запрещённых символов, ≤ 60 символов."""
+    name = _FILENAME_BAD.sub(" ", title or "").strip(" .")
+    name = re.sub(r"\s+", " ", name)[:60].strip() or fallback
+    return f"{name}.{ext}"
 
 
 def build_caption(
