@@ -138,17 +138,16 @@ async def handle_link(msg: Message, bot: Bot, lang: str) -> None:
     emoji = PLATFORM_EMOJIS.get(platform, "🌐")
     key = cache_key(url)
 
-    # Быстрый путь: видео уже загружали — отдаём по file_id, без очереди.
+    # Быстрый путь: медиа уже загружали — отдаём по file_id, без очереди.
     if settings.file_cache_enabled:
         cached = await db.get_cached_video(key)
         if cached:
+            caption = build_caption(cached["title"], cached["duration"], platform, emoji)
             try:
-                await msg.reply_video(
-                    video=cached["file_id"],
-                    caption=build_caption(
-                        cached["title"], cached["duration"], platform, emoji
-                    ),
-                )
+                if cached.get("is_photo"):
+                    await msg.reply_photo(photo=cached["file_id"], caption=caption)
+                else:
+                    await msg.reply_video(video=cached["file_id"], caption=caption)
                 return
             except TelegramBadRequest as exc:
                 log.info("stale file_id for %s: %s", key, exc)

@@ -182,17 +182,30 @@ class QueueManager:
 
         try:
             await safe_edit(task.status_msg, t(task.lang, "sending"))
-            sent = await task.reply_to.reply_video(
-                video=FSInputFile(result.path),
-                caption=build_caption(result.title, result.duration, task.platform, emoji),
-            )
+            caption = build_caption(result.title, result.duration, task.platform, emoji)
+            if result.is_photo:
+                sent = await task.reply_to.reply_photo(
+                    photo=FSInputFile(result.path),
+                    caption=caption,
+                )
+                cached_file_id = sent.photo[-1].file_id if sent.photo else None
+            else:
+                sent = await task.reply_to.reply_video(
+                    video=FSInputFile(result.path),
+                    caption=caption,
+                )
+                cached_file_id = sent.video.file_id if sent.video else None
             with contextlib.suppress(Exception):
                 await task.status_msg.delete()
             self._total_ok += 1
 
-            if settings.file_cache_enabled and sent.video:
+            if settings.file_cache_enabled and cached_file_id:
                 await db.save_cached_video(
-                    task.url_key, sent.video.file_id, result.title, result.duration
+                    task.url_key,
+                    cached_file_id,
+                    result.title,
+                    result.duration,
+                    is_photo=result.is_photo,
                 )
         except TelegramBadRequest:
             await safe_edit(task.status_msg, t(task.lang, "error_send_failed"))
@@ -209,13 +222,18 @@ class QueueManager:
         if not cached:
             return False
         emoji = PLATFORM_EMOJIS.get(task.platform, "🌐")
+        caption = build_caption(cached["title"], cached["duration"], task.platform, emoji)
         try:
-            await task.reply_to.reply_video(
-                video=cached["file_id"],
-                caption=build_caption(
-                    cached["title"], cached["duration"], task.platform, emoji
-                ),
-            )
+            if cached.get("is_photo"):
+                await task.reply_to.reply_photo(
+                    photo=cached["file_id"],
+                    caption=caption,
+                )
+            else:
+                await task.reply_to.reply_video(
+                    video=cached["file_id"],
+                    caption=caption,
+                )
         except TelegramBadRequest as exc:
             log.info("stale file_id for %s: %s", task.url_key, exc)
             await db.drop_cached_video(task.url_key)

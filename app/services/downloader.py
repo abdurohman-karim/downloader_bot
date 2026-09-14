@@ -27,11 +27,15 @@ from app.core.config import settings
 log = logging.getLogger(__name__)
 
 
+_IMAGE_EXTS = frozenset({".jpg", ".jpeg", ".png", ".webp", ".gif"})
+
+
 @dataclass
 class DownloadResult:
     path: str | None = None
     title: str | None = None
     duration: int | None = None
+    is_photo: bool = False
     error: str | None = None          # ключ i18n, напр. "err_private"
     detail: str | None = None         # сырой текст для логов
 
@@ -129,12 +133,14 @@ class VideoDownloader:
         )
 
         last_error: str | None = None
+        last_was_retryable = False
         for fmt in formats:
             res = await self._attempt(url, fmt)
 
             if res.error:
                 if res.detail and any(k in res.detail.lower() for k in _RETRYABLE):
                     last_error = res.error
+                    last_was_retryable = True
                     continue
                 return res
 
@@ -143,6 +149,19 @@ class VideoDownloader:
                     return res
                 self.cleanup(res.path)
                 last_error = "err_too_big"
+                last_was_retryable = False
+
+        # All video format selectors rejected the URL — could be a photo/image post.
+        if last_was_retryable:
+            res = await self._attempt_any(url)
+            if res.ok and res.path:
+                if Path(res.path).stat().st_size <= limit:
+                    return res
+                self.cleanup(res.path)
+                return DownloadResult(error="err_too_big")
+            if res.error:
+                if not (res.detail and any(k in res.detail.lower() for k in _RETRYABLE)):
+                    return res  # propagate non-retryable errors from fallback
 
         return DownloadResult(error=last_error or "err_too_big")
 
@@ -188,9 +207,44 @@ class VideoDownloader:
                 path=str(file),
                 title=info.get("title") if info else None,
                 duration=info.get("duration") if info else None,
+                is_photo=file.suffix.lower() in _IMAGE_EXTS,
             )
 
         return DownloadResult(error="err_unknown", detail="file not found after download")
+
+    async def _attempt_any(self, url: str) -> DownloadResult:
+        """Fallback без видео-ограничений: для фото/изображений из Instagram и т.п."""
+        uid = uuid.uuid4().hex[:12]
+        opts = {
+            **self._BASE_OPTS,
+            "outtmpl": str(self._dir / f"{uid}.%(ext)s"),
+            "format": "best",
+            "http_headers": self._HTTP_HEADERS,
+        }
+        opts.pop("merge_output_format", None)  # не форсируем mp4 — изображение им не станет
+
+        loop = asyncio.get_running_loop()
+        try:
+            info = await loop.run_in_executor(self._pool, self._sync_dl, url, opts)
+        except yt_dlp.utils.DownloadError as exc:
+            raw = str(exc)
+            return DownloadResult(error=self._classify(raw), detail=raw)
+        except Exception as exc:  # noqa: BLE001
+            raw = str(exc)
+            log.warning("yt-dlp photo fallback failed: %s", raw[:200])
+            return DownloadResult(error=self._classify(raw), detail=raw)
+
+        for file in self._dir.glob(f"{uid}.*"):
+            if file.suffix in (".part", ".ytdl"):
+                continue
+            return DownloadResult(
+                path=str(file),
+                title=info.get("title") if info else None,
+                duration=info.get("duration") if info else None,
+                is_photo=file.suffix.lower() in _IMAGE_EXTS,
+            )
+
+        return DownloadResult(error="err_unknown", detail="file not found after fallback download")
 
     @staticmethod
     def _sync_dl(url: str, opts: dict) -> dict | None:

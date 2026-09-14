@@ -47,12 +47,13 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL
 );
 
--- Кэш уже отправленных видео: повторная ссылка отдаётся мгновенно по file_id.
+-- Кэш уже отправленных медиа: повторная ссылка отдаётся мгновенно по file_id.
 CREATE TABLE IF NOT EXISTS video_cache (
     url_key    TEXT PRIMARY KEY,
     file_id    TEXT NOT NULL,
     title      TEXT,
     duration   INTEGER,
+    is_photo   INTEGER   DEFAULT 0,
     hits       INTEGER   DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -98,6 +99,15 @@ class Database:
             list(_DEFAULT_SETTINGS.items()),
         )
         await self._db.commit()
+
+        # Migrate: add is_photo column for existing databases
+        try:
+            await self._db.execute(
+                "ALTER TABLE video_cache ADD COLUMN is_photo INTEGER DEFAULT 0"
+            )
+            await self._db.commit()
+        except Exception:  # noqa: BLE001 — column already exists
+            pass
 
         await self._load_settings_cache()
         self._flush_task = asyncio.create_task(self._flush_loop(), name="db-flush")
@@ -244,7 +254,7 @@ class Database:
 
     async def get_cached_video(self, url_key: str) -> dict | None:
         async with self.conn.execute(
-            "SELECT file_id, title, duration FROM video_cache WHERE url_key = ?",
+            "SELECT file_id, title, duration, is_photo FROM video_cache WHERE url_key = ?",
             (url_key,),
         ) as cur:
             row = await cur.fetchone()
@@ -257,12 +267,18 @@ class Database:
         return dict(row)
 
     async def save_cached_video(
-        self, url_key: str, file_id: str, title: str | None, duration: int | None
+        self,
+        url_key: str,
+        file_id: str,
+        title: str | None,
+        duration: int | None,
+        *,
+        is_photo: bool = False,
     ) -> None:
         await self.conn.execute(
-            "INSERT OR REPLACE INTO video_cache (url_key, file_id, title, duration) "
-            "VALUES (?, ?, ?, ?)",
-            (url_key, file_id, title, duration),
+            "INSERT OR REPLACE INTO video_cache (url_key, file_id, title, duration, is_photo) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (url_key, file_id, title, duration, int(is_photo)),
         )
         await self.conn.commit()
 
